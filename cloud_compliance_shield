@@ -1,0 +1,1950 @@
+#view
+
+import os
+import json
+import boto3
+import psycopg2
+from botocore.exceptions import ClientError
+from datetime import datetime
+
+region_name = os.environ['REGION']
+secret_name = os.environ['DATABASE_CREDENTIALS']
+
+secretsmanager_client = boto3.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+
+def get_secret():
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+def main(event, context):
+    dbsecrets = json.loads(get_secret())
+
+    # Creating connection to Database
+    connection = psycopg2.connect(
+        database=dbsecrets['dbname'],
+        user=dbsecrets['username'],
+        password=dbsecrets['password'],
+        host=dbsecrets['proxy'],
+        port=dbsecrets['port']
+    )
+    
+    # Creating cursors
+    cursor = connection.cursor()
+
+    try:
+        # Define the SQL query to select from the view
+        view_query = "SELECT * FROM ccsadminnew.vwget_cloudaccounts;"
+
+        # Execute the query using the cursor
+        cursor.execute(view_query)
+
+        # Fetch column names
+        colnames = [desc[0] for desc in cursor.description]
+        
+        rows = cursor.fetchall()
+        
+        # Map column names to row values
+        data = [dict(zip(colnames, row)) for row in rows]
+
+        # Convert datetime objects to strings
+        for record in data:
+            for key, value in record.items():
+                if isinstance(value, datetime):
+                    record[key] = value.isoformat()
+
+        # Return the data in dictionary format
+        return {"statusCode": 200, "body": data}
+
+    except Exception as e:
+        return {"statusCode": 500, "body": f"Error fetching cloud accounts: {str(e)}"}
+    finally:
+        cursor.close()
+        connection.close()
+
+-----------------------------------------
+
+#delete
+
+import json
+import boto3
+import psycopg2
+from botocore.exceptions import ClientError
+import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
+region_name = os.environ['REGION']
+secret_name = os.environ['DATABASE_CREDENTIALS']
+
+secretsmanager_client = boto3.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+
+def get_secret():
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+        return get_secret_value_response['SecretString']
+    except ClientError as e:
+        logger.error(f"Unable to retrieve secret: {e}")
+        raise e
+
+def main(event, context):
+    try:
+        dbsecrets = json.loads(get_secret())
+
+        # Creating connection to Database
+        connection = psycopg2.connect(
+            database=dbsecrets['dbname'],
+            user=dbsecrets['username'],
+            password=dbsecrets['password'],
+            host=dbsecrets['proxy'],
+            port=dbsecrets['port']
+        )
+
+        # Creating cursor
+        cursor = connection.cursor()
+
+        # Extract the cloudaccount_id from the event
+        cloudaccount_id = event.get('cloudaccount_id')
+        if not cloudaccount_id:
+            logger.warning("cloudaccount_id is missing in the event")
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'cloudaccount_id is required'})
+            }
+
+        # Call the stored procedure
+        cursor.execute("CALL ccsadminnew.sp_delete_ccs_cust_cloudaccounts(%s)", (cloudaccount_id,))
+        
+        # Commit the transaction
+        connection.commit()
+
+    except Exception as e:
+        logger.error(f"Error occurred: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
+    finally:
+        # Close the cursor and connection
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+    logger.info(f"Cloud account ID {cloudaccount_id} is deleted successfully")
+    return {
+        'statusCode': 200,
+        'body': json.dumps({'message': f'Cloud account ID {cloudaccount_id} is deleted successfully'})
+    }
+
+-----------------------------------------
+
+#aws add
+
+import json
+import boto3
+import os
+import psycopg2
+from botocore.exceptions import ClientError
+import base64
+
+# Setup AWS region and secret manager details
+region_name = os.environ['REGION']
+secret_name = os.environ['DATABASE_CREDENTIALS']
+
+# Create a Secrets Manager client
+secretsmanager_client = boto3.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+ 
+# Encode to base64
+def encode_base64(value: str) -> str:
+    return base64.b64encode(value.encode('utf-8')).decode('utf-8')
+ 
+# Decode from base64
+def decode_base64(encoded_value: str) -> str:
+    return base64.b64decode(encoded_value.encode('utf-8')).decode('utf-8')
+
+
+def get_secret():
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    else:
+        return get_secret_value_response['SecretString']
+
+def main(event, context):
+    dbsecrets = json.loads(get_secret())
+
+    # Creating connection to Database
+    connection = psycopg2.connect(
+        database=dbsecrets['dbname'],
+        user=dbsecrets['username'],
+        password=dbsecrets['password'],
+        host=dbsecrets['proxy'],
+        port=dbsecrets['port']
+    )
+
+    # Creating cursor
+    cursor = connection.cursor()
+
+    try:
+        # Extract cloud provider details from the event
+        accountownername = event.get('accountownername')
+        businessname = event.get('businessname')
+        cloudtype = event.get('cloudtype')
+        accountid = event.get('accountid')
+        accesskey = event.get('accesskey')
+        secretkey = event.get('secretkey')
+        accountowneremailid = event.get('accountowneremailid')
+
+        event["accesskey"] = encode_base64(accesskey)
+        event["secretkey"] = encode_base64(secretkey)
+        accesskey = event.get('accesskey')
+        secretkey = event.get('secretkey')
+
+
+        # Call the stored procedure using a SELECT statement
+        cursor.execute("""
+            CALL ccsadminnew.sp_insert_ccs_cust_awscloudaccounts(
+                %s, %s, %s, %s, %s, %s, %s
+            );
+        """, (accountid, accesskey, accountownername, accountowneremailid, secretkey, cloudtype, businessname))
+
+        # Assuming the procedure uses RAISE NOTICE for output messages, fetch messages from the notice
+        connection.commit()
+        notices = cursor.connection.notices
+        status_message = notices[-1] if notices else "No message returned."
+        # print(status_message)
+        # status_message = status_message.replace("NOTICE:  ","")
+
+        # Return the response with status code and message
+        if status_message == "NOTICE:  Account is already active!\n":
+            status_code = 409 # Conflict
+            status_message_type = "error"
+            status_message = "Account is already active!"
+        else:
+            status_code = 200 # Success
+            status_message_type = "message"
+
+        return {
+            'statusCode': status_code,
+            'body': {
+                status_message_type: status_message,
+                "data": event
+            }
+        }
+
+    except Exception as e:
+        connection.rollback()
+        return {
+            "statusCode": 500, # Internal Server Error
+            "body": {
+                "error": str(e)
+            }
+        }
+    finally:
+        cursor.close()
+        connection.close()
+
+-----------------------------------------------
+
+#aws edit
+
+import json
+import boto3
+import os
+import psycopg2
+from botocore.exceptions import ClientError
+import base64
+
+region_name = os.environ['REGION']
+secret_name = os.environ['DATABASE_CREDENTIALS']
+
+secretsmanager_client = boto3.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+ 
+# Encode to base64
+def encode_base64(value: str) -> str:
+    return base64.b64encode(value.encode('utf-8')).decode('utf-8')
+ 
+# Decode from base64
+def decode_base64(encoded_value: str) -> str:
+    return base64.b64decode(encoded_value.encode('utf-8')).decode('utf-8')
+
+def get_secret():
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+def main(event, context):
+    dbsecrets = json.loads(get_secret())
+
+    # Creating connection to Database
+    connection = psycopg2.connect(
+        database=dbsecrets['dbname'],
+        user=dbsecrets['username'],
+        password=dbsecrets['password'],
+        host=dbsecrets['proxy'],
+        port=dbsecrets['port']
+    )
+
+    # Creating cursor
+    cursor = connection.cursor()
+
+    try:
+        # Extract the cloud provider details from the event
+        accountid = event.get('accountid')
+        accountowneremailid = event.get('accountowneremailid')
+        accesskey = event.get('accesskey')
+        secretkey = event.get('secretkey')
+        businessname = event.get('businessname')
+
+        event["accesskey"] = encode_base64(accesskey)
+        event["secretkey"] = encode_base64(secretkey)
+        accesskey = event.get('accesskey')
+        secretkey = event.get('secretkey')
+
+
+        # Prepare the SQL query to call the stored procedure
+        sql_query = """
+        CALL ccsadminnew.sp_edit_ccs_cust_awscloudaccounts(
+            %s, %s, %s, %s, %s
+        );
+        """
+        cursor.execute(sql_query, (accountid, accountowneremailid, accesskey, secretkey, businessname))
+        connection.commit()
+
+        notices = cursor.connection.notices
+        status_message = notices[-1] if notices else "No message returned."
+        status_message = status_message.replace("NOTICE:","")
+
+        return {
+            'statusCode': 200,
+            'body': {
+                "message": status_message,
+                "data": event
+            }
+        }
+
+    except Exception as e:
+        return {"statusCode": 500, "body": {"error": str(e)}}
+    finally:
+        cursor.close()
+        connection.close()
+
+-----------------------------------------
+
+#aws validation
+
+import json
+import boto3
+from botocore.exceptions import ClientError
+# from botocore.exceptions import InvalidClientTokenId
+import os
+
+# Setup AWS region and secret manager details
+region_name = os.environ['REGION']
+secret_name = os.environ['DATABASE_CREDENTIALS']
+
+# Create a Secrets Manager client
+secretsmanager_client = boto3.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+
+# Function to retrieve secrets from AWS Secrets Manager
+def get_secret():
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+# Function to validate AWS account credentials
+def validate_aws_account(accesskey, secretkey, accountid):
+    sts_client = boto3.client('sts', aws_access_key_id=accesskey, aws_secret_access_key=secretkey)
+    try:
+        response = sts_client.get_caller_identity()
+        response_accountid = response['Account']
+        return str(response_accountid) == str(accountid)
+    except Exception as e:
+        return False
+
+
+# Lambda handler function
+def main(event, context):
+    accesskey = event["accesskey"]
+    secretkey = event["secretkey"]
+    accountid = str(event["accountid"])
+    try:
+        # Validate AWS Account
+        is_valid_aws = validate_aws_account(accesskey, secretkey, accountid)
+        if not is_valid_aws:
+            return {
+                'statusCode': 422,
+                'body': "Invalid AWS account credentials"
+            }
+
+        else:
+            return {
+                'statusCode': 200,
+                'body': {
+                    "message": "AWS account validated successfully!",
+                    "credentials": {
+                        "accesskey": accesskey,
+                        "secretkey": secretkey,
+                        "accountid": accountid
+                    }
+                }
+            }
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            "body": str(e)
+        }
+
+---------------------------------------
+
+#azure add
+
+import json
+import boto3
+import psycopg2
+from botocore.exceptions import ClientError
+import os 
+import base64
+
+region_name = os.environ['REGION']
+secret_name = os.environ['DATABASE_CREDENTIALS']
+
+secretsmanager_client = boto3.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+
+def get_secret():
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+def main(event, context):
+    dbsecrets = json.loads(get_secret())
+
+    # Creating connection to Database
+    connection = psycopg2.connect(
+        database=dbsecrets['dbname'],
+        user=dbsecrets['username'],
+        password=dbsecrets['password'],
+        host=dbsecrets['proxy'],
+        port=dbsecrets['port']
+    )
+
+    # Creating cursor
+    cursor = connection.cursor()
+
+    try:
+        # Extract the cloud provider details from the event
+        cloudtype           = event.get('cloudtype')
+        subscriptionid      = event.get('subscriptionid')
+        accountownername    = event.get('accountownername')
+        tenantid            = event.get('tenantid')
+        accountowneremailid = event.get('accountowneremailid')
+        subscriptionname    = event.get('subscriptionname')
+        clientid            = event.get('clientid')
+        clientsecret        = event.get('clientsecret')
+        businessname        = event.get('businessname')
+
+        #Todo Tenantid,Clientid,ClientSecret needs to be in encode in base64
+        encoded_tenantid = base64.b64encode(tenantid.encode('utf-8')).decode('utf-8')
+        encoded_clientid = base64.b64encode(clientid.encode('utf-8')).decode('utf-8')
+        encoded_clientsecret = base64.b64encode(clientsecret.encode('utf-8')).decode('utf-8')
+
+        # Prepare the SQL query to call the stored procedure
+        sql_query = """
+        CALL ccsadminnew.sp_insert_ccs_cust_azurecloudaccounts(
+            %s, %s, %s, %s, %s, %s, %s, %s, %s
+        );
+        """
+        cursor.execute(sql_query, (cloudtype, subscriptionid, accountownername, encoded_tenantid, accountowneremailid, subscriptionname, encoded_clientid, encoded_clientsecret, businessname))
+        connection.commit()
+
+        notices = cursor.connection.notices
+        status_message = notices[-1] if notices else "No message returned."
+
+        # Return the response with status code and message
+        if status_message == "NOTICE:  Account is already active!\n":
+            status_code = 409
+            status_message_type = "error"
+            status_message = "Account is already active!"
+        else:
+            status_code = 200
+            status_message_type = "message"
+
+        return {
+            'statusCode': status_code,
+            'body': {
+                status_message_type: status_message,
+                "data": event
+            }
+        }
+
+    except Exception as e:
+        connection.rollback()
+        return {
+            "statusCode": 500, 
+            "body": {
+                "error": str(e)
+            }
+        }
+    finally:
+        cursor.close()
+        connection.close()
+
+------------------------------------------------
+
+#azure validation
+
+import json
+import requests
+
+def list_subscription(head):
+    url1 = "https://management.azure.com/subscriptions?api-version=2020-01-01"
+    r = requests.get(url1, headers=head)
+    r.raise_for_status()  # Raise an error for bad responses
+    return r.json().get('value', [])
+
+def validate_azure_account(tenantid, clientid, clientsecret, subscriptionid, subscriptionname):
+    grant_type = "client_credentials"
+    resource = "https://management.azure.com/"
+    
+    url = f"https://login.microsoftonline.com/{tenantid}/oauth2/token"
+    payload = {
+        'client_id': clientid,
+        'client_secret': clientsecret,
+        'grant_type': grant_type,
+        'resource': resource
+    }
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}   
+
+    response = requests.post(url, headers=headers, data=payload)
+    
+    if response.status_code != 200:
+        return {
+            'statusCode': 422,
+            'body': "Invalid Azure account credentials"
+        }
+    
+    token = response.json()['access_token']
+    head = {'Authorization': 'Bearer ' + token}
+    
+    try:
+        subscriptions = list_subscription(head)
+    except requests.exceptions.HTTPError as e:
+        return {
+            'statusCode': 500,
+            'body': "Failed to retrieve subscriptions"
+        }
+    
+    print('subscriptions', subscriptions)
+
+    for subscription in subscriptions:
+        # print('subscription', subscription)
+        if subscription['subscriptionId'].strip() == subscriptionid and subscription['displayName'].strip() == subscriptionname:
+            return {
+                'statusCode': 200,
+                'body': {
+                    "message": "Azure account validated successfully!",
+                    "subscriptionId": subscriptionid,
+                    "subscriptionName": subscriptionname,
+                    "tenantid": tenantid,
+                    "clientid": clientid,
+                    "clientsecret": clientsecret
+                }
+            }
+        elif subscription['subscriptionId'].strip() == subscriptionid and subscription['displayName'].strip() != subscriptionname:
+            return {
+                'statusCode': 422,
+                'body': "Subscription name does not match"
+            }
+        else:
+            return {
+                'statusCode': 422,
+                'body': "Subscription ID does not match"
+            }
+
+    
+    return {
+        'statusCode': 404,
+        'body': "Subscription not found"
+    }
+
+def main(event, context):
+    tenantid = event['tenantid']
+    clientid = event['clientid']
+    clientsecret = event['clientsecret']
+    subscriptionid = event['subscriptionid'].strip()
+    subscriptionname = event['subscriptionname']
+    
+    try:
+        validation_response = validate_azure_account(tenantid, clientid, clientsecret, subscriptionid, subscriptionname)
+        return validation_response
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': "Internal server error"
+        }
+
+-------------------------------------------------
+
+#gcp validation
+
+import json
+from google.auth import exceptions
+from google.oauth2 import service_account
+from google.cloud import resourcemanager_v3
+
+def validate_gcp_credentials(credentials_info):
+    try:
+        # Create credentials from the service account info
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        
+        # Initialize the ProjectsClient with the credentials
+        client = resourcemanager_v3.ProjectsClient(credentials=credentials)
+        
+        # Retrieve the project ID from the credentials info
+        project_id = credentials_info['project_id']
+        
+        # Attempt to get the project to validate credentials
+        project = client.get_project(name=f'projects/{project_id}')
+        
+        # If successful, return a success message
+        return {
+            'statusCode': 200,
+            'body': {
+                "message": "GCP account validated successfully!",
+                "projectId": project_id,
+                "credentialsInfo": credentials_info
+            }
+        }
+    except exceptions.GoogleAuthError as e:
+        # Handle specific Google authentication errors
+        return {
+            'statusCode': 422,
+            'body': "Invalid GCP account credentials"
+            
+        }
+    except Exception as e:
+        # Handle general exceptions
+        return {
+            'statusCode': 500,
+            'body': "Validation failed!"
+        } 
+
+def main(event, context):
+    # The event itself is the credentials_info
+    return validate_gcp_credentials(event)
+
+-----------------------------------
+
+#api_carg.py
+
+import pytest
+from unittest.mock import patch, MagicMock
+import lambda_function
+
+# Mock environment variables
+import os
+os.environ['SECRET_NAME'] = 'dummy-secret'
+os.environ['REGION_NAME'] = 'dummy-region'
+os.environ['ACCOUNT_MASTER_TABLE'] = 'account_master'
+os.environ['ALERT_TABLE'] = 'alert_table'
+os.environ['AZURE_SUBSCRIPTION_ID'] = 'subid'
+os.environ['AZURE_TENANT_ID'] = 'tenantid'
+os.environ['AZURE_CLIENT_ID'] = 'clientid'
+os.environ['AZURE_CLIENT_SECRET'] = 'clientsecret'
+
+# -------- Test get_secret --------
+
+@patch('lambda_function.secretmanager_client')
+def test_get_secret(mock_sm_client):
+    mock_sm_client.get_secret_value.return_value = {'SecretString': '{"username": "user", "password": "pass"}'}
+    result = lambda_function.get_secret()
+    assert result == '{"username": "user", "password": "pass"}'
+
+# -------- Test db_manager --------
+
+@patch('lambda_function.get_secret')
+@patch('lambda_function.psycopg2.connect')
+def test_db_manager_success(mock_connect, mock_get_secret):
+    mock_get_secret.return_value = '{"dbname":"db", "username":"user", "password":"pass", "proxy":"host", "port":"5432"}'
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("accesskey", "secretkey")
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    accesskey, secretkey = lambda_function.db_manager("test_account")
+    assert accesskey == "accesskey"
+    assert secretkey == "secretkey"
+
+@patch('lambda_function.get_secret')
+@patch('lambda_function.psycopg2.connect')
+def test_db_manager_no_data(mock_connect, mock_get_secret):
+    mock_get_secret.return_value = '{"dbname":"db", "username":"user", "password":"pass", "proxy":"host", "port":"5432"}'
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    accesskey, secretkey = lambda_function.db_manager("unknown_account")
+    assert accesskey is None and secretkey is None
+
+# -------- Test status_manager --------
+
+@patch('lambda_function.get_secret')
+@patch('lambda_function.psycopg2.connect')
+def test_status_manager_success(mock_connect, mock_get_secret):
+    mock_get_secret.return_value = '{"dbname":"db", "username":"user", "password":"pass", "proxy":"host", "port":"5432"}'
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    # Should not raise exceptions
+    lambda_function.status_manager("alertid")
+    mock_cursor.execute.assert_called_once()
+
+# -------- Test get_resource_group_name --------
+
+@patch('lambda_function.StorageManagementClient')
+@patch('lambda_function.ClientSecretCredential')
+def test_get_resource_group_name(mock_cred, mock_storage_client):
+    # Simulate storage account list
+    mock_account = MagicMock()
+    mock_account.name = 'myaccount'
+    mock_account.id = '/subscriptions/123/resourceGroups/mygroup/providers/Microsoft.Storage/storageAccounts/myaccount'
+    mock_storage_client.return_value.storage_accounts.list.return_value = [mock_account]
+
+    rg = lambda_function.get_resource_group_name(
+        'subid', 'tenantid', 'clientid', 'clientsecret', 'myaccount'
+    )
+    assert rg == 'mygroup'
+
+@patch('lambda_function.StorageManagementClient')
+@patch('lambda_function.ClientSecretCredential')
+def test_get_resource_group_name_not_found(mock_cred, mock_storage_client):
+    # Simulate no match
+    mock_account = MagicMock()
+    mock_account.name = 'otheraccount'
+    mock_account.id = '/subscriptions/123/resourceGroups/othergroup/providers/Microsoft.Storage/storageAccounts/otheraccount'
+    mock_storage_client.return_value.storage_accounts.list.return_value = [mock_account]
+
+    with pytest.raises(Exception):
+        lambda_function.get_resource_group_name(
+            'subid', 'tenantid', 'clientid', 'clientsecret', 'notfound'
+        )
+
+# -------- Test main --------
+
+@patch('lambda_function.get_resource_group_name')
+@patch('lambda_function.status_manager')
+@patch('lambda_function.get_secret')
+@patch.dict(lambda_function.RULE_ACTIONS, {
+    "SampleRule": (lambda *a, **k: True, "Success msg"),
+})
+def test_main_success(mock_get_secret, mock_status, mock_get_rg):
+    event = {
+        "ConfigRuleName": "SampleRule",
+        "lambdaArgs": {
+            "ACCOUNTID": "aid",
+            "ALERTID": "alertid",
+            "RESOURCETYPE": "storage",
+            "ASSETID": "assetid",
+            "REGIONNAME": "region"
+        }
+    }
+    mock_get_rg.return_value = 'dummy-rg'
+    mock_get_secret.return_value = '{"dbname":"db"}'
+
+    resp = lambda_function.main(event, {})
+    assert resp['statusCode'] == 200
+    assert "Selfheal has been completed" in resp['title']
+
+def test_success_response():
+    msg = "Hello"
+    resp = lambda_function.success_response(msg)
+    assert resp['statusCode'] == 200
+    assert 'Hello' in resp['body']
+
+def test_failure_response():
+    msg = "Fail"
+    resp = lambda_function.failure_response(msg)
+    assert resp['statusCode'] == 404
+    assert 'Fail' in resp['body']
+-----------------------------------
+
+#api executor.py
+
+from dotenv import load_dotenv
+from botocore.exceptions import ClientError
+import base64
+import os
+from azure.identity import ClientSecretCredential
+from API_policy import *
+from API_carg import *
+import psycopg2
+import boto3
+import json
+import requests
+print("executing Azure API management Service checks")
+
+load_dotenv()
+
+
+def get_secret():
+    secret_name = os.environ['SECRET_NAME']
+    region_name = os.environ['REGION_NAME']
+    secretsmanager_client = boto3.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+
+def base64decoder(encoded_string):
+    try:
+        decoded_bytes = base64.b64decode(encoded_string)
+        decoded_string = decoded_bytes.decode('utf-8')
+        return decoded_string
+    except Exception as e:
+        print(f"Error decoding base64 string: {e}")
+        return None
+
+
+def get_db_connection():
+    secret = json.loads(get_secret())
+    conn = psycopg2.connect(
+        host=secret['proxy'],
+        port=secret['port'],
+        database=secret['dbname'],
+        user=secret['username'],
+        password=secret['password']
+    )
+    return conn
+
+
+def headers(credential):
+    head = {
+        "Authorization": f"Bearer {credential.get_token('https://management.azure.com/.default').token}"
+    }
+    return head
+
+
+def db_data_collection():
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        "SELECT clientid, clientsecret,tenantid,subscriptionid FROM ccsadminnew.ccscloudaccountmaster where cloudtype_id=2;")
+    rows = cursor.fetchall()
+    result = []
+    if not rows:
+        return {
+            'statusCode': 404,
+            'body': json.dumps('No data found')
+        }
+    try:
+        for row in rows:
+            tenant_id = row[2]
+            print(tenant_id)
+            client_id = row[0]
+            client_secret = row[1]
+            subscription_id = row[3]
+            credential = ClientSecretCredential(
+                tenant_id, client_id, client_secret)
+            head = headers(credential)
+            result.append([subscription_id, head, credential])
+        cursor.close()
+        connection.close()
+        print(result)
+        return result
+    except Exception as e:
+        print(f"Error in calling functions: {e}")
+
+
+def list_API_management(subscription_id, head):
+    url1 = "https://management.azure.com/subscriptions/"+subscription_id + \
+        "/providers/Microsoft.ApiManagement/service?api-version=2019-12-01"
+    r = requests.request("GET", url1, headers=head)
+    return json.loads(r.text).get('value')
+
+
+def diagnostics(resourceId, head):
+    diagnostic_url = "https://management.azure.com/"+resourceId + \
+        "/providers/microsoft.insights/diagnosticSettings?api-version=2021-05-01-preview"
+    req = requests.request("GET", diagnostic_url, headers=head)
+    return json.loads(req.text).get('value', [])
+
+
+def evidence_db_insert(Policyname, observation, subscription_id, name, resourceId, location, evidence):
+    policyname = Policyname
+    observation = observation
+    subscription_id = subscription_id
+    name = name
+    resourceId = resourceId
+    location = location
+    evidence = evidence
+
+
+def main():
+    results = db_data_collection()
+    print(results)
+    for result in results:
+        subscription_id = result[0]
+        # print(subscription_id)
+        credential = result[2]
+        head = headers(credential)
+        non389, non307 = ([] for i in range(2))
+        com307, com389 = ([] for i in range(2))
+        non_status = "ACTIVE"
+        com_status = "INACTIVE"
+
+        services = list_API_management(subscription_id, head)
+        for service in services:
+            resourceId = service['id']
+            asset_name = service['name']
+            location = service['location']
+            vnet = service['properties']['virtualNetworkType']
+            resource_type = service['type'].split('/')[0].lower()
+            asset_type = service['type'].split('/')[1].lower()
+            print("____________resource_type:",
+                  resource_type, "_____________", asset_type)
+            # print(resourceId)
+            if vnet == "None":
+                non307.append(p307(asset_name, resource_type,
+                              asset_type, location, non_status, subscription_id))
+                # print("API Management services should use a virtual network", non307)
+                Policyname = "API Management services should use a virtual network"
+                observation = "Please check virtualNetworkType section "
+                evidence = service['properties']
+                # evidence_db_insert(Policyname,observation,subscription_id,name,resourceId,location,evidence)
+
+            else:
+                com307.append(p307(asset_name, resource_type,
+                              asset_type, location, com_status, subscription_id))
+
+            diag = diagnostics(resourceId, head)
+            if len(diag) > 0:
+                com389.append(p389(asset_name, resource_type,
+                              asset_type, location, com_status, subscription_id))
+            else:
+                non389.append(p389(asset_name, resource_type,
+                              asset_type, location, non_status, subscription_id))
+                # print("There is no data in diagnostics settings", non389)
+                Policyname = "Ensure that a 'Diagnostics Setting' exists for API Management Service"
+                observation = "There is no data in diagnostics settings "
+                evidence = diag
+                # evidence_db_insert(Policyname,observation,subscription_id,name,resourceId,location,evidence)
+
+       # p307_send(non307,com307)
+       # p389_send(non389,com389)
+        print(non307)
+        print(com307)
+        print(non389)
+        print(com389)
+
+
+if __name__ == '__main__':
+    main()
+
+---------------------------
+
+#api_policy.py
+
+from datetime import date
+from datetime import datetime
+import API_exec
+import json
+
+
+t=datetime.now()
+x = t.replace(microsecond=0)
+Time = int(datetime.timestamp(x))
+
+#Resource="API Management Services"
+#Assets = "API Management Service"
+	
+def output(Policyname,location,asset_name, resource_type, asset_type,Status,Description,Recommendation,subscription_id):
+    if Status=="Open":            
+        json_obj={
+                    "Source" : "Native service - Azure",
+                    "PolicyName": Policyname,
+                    "CloudType": "Azure",
+                    "CloudAccountId": subscription_id,
+                    "ResourceRegion": location,
+                    "Resource": resource_type,
+                    "Assets": asset_type,
+                    "Asset_name": asset_name,
+                    "Status": Status,
+                    "OpenedAt" : Time,
+                    "ClosedAt": "Nil",
+                    "Description": Description,
+                    "Recommendation": Recommendation
+                }
+    else:
+        json_obj={
+                    "Source" : "Native service - Azure",
+                    "PolicyName": Policyname,
+                    "CloudType": "Azure",
+                    "CloudAccountId": subscription_id,
+                    "ResourceRegion": location,
+                    "Resource": resource_type,
+                    "Assets": asset_type,
+                    "Asset_name": asset_name,
+                    "Status": Status,
+                    "OpenedAt" : Time,
+                    "ClosedAt": "Nil",
+                    "Description": Description,
+                    "Recommendation": Recommendation
+                }
+    return json_obj
+
+def non_compliance_db_insert(output):
+    conn = API_exec.get_db_connection()
+    cursor = conn.cursor()
+    print("Inserting non-compliance data into the database", output.get('asset_name', ''))
+     
+    try:
+        # Construct the JSON array
+        json_array = json.dumps([{
+            "p_assetname": output.get('asset_name', ''),
+            "p_configrulename": output.get('PolicyName', ''),
+            "p_resourcetype": output.get('Resource', ''),
+            "p_compliancetype": "Non Compliant",
+            "p_resultrecordedtime": output.get('OpenedAt', ''),
+            "p_accountid": output.get('CloudAccountId', ''),
+            "p_remedystatus": "Active",
+            "p_region": output.get('ResourceRegion', '')
+        }])
+        
+        # Call the stored procedure with the JSON array as a parameter
+        cursor.execute("CALL ccsadminnew.sp_insert_ccsazurealerts(%s)", (json_array,))
+        
+        conn.commit()
+        print("Non-compliance data inserted into the database successfully")
+    except Exception as e:
+        conn.rollback()
+        print("Error occurred while inserting non-compliance data:", e)
+    finally:
+        cursor.close()
+        conn.close()
+
+# def non_compliance_db_insert(output):
+#     # print("Inserting non-compliance data into the database", output)
+#     conn = API_exec.get_db_connection()
+#     cursor = conn.cursor()
+    
+#     try:
+#         # json_data = json.loads(output)
+#         # print("JSON data to be inserted:", json_data)
+
+#         p_assetname = output.get('Assets', '')  # Replace 'Assets' with the actual key
+#         p_configrulename = output.get('PolicyName', '')  # Replace 'PolicyName' with the actual key
+#         p_resourcetype = output.get('Resource', '')  # Replace 'Resource' with the actual key
+#         p_compliancetype = "Non Compliant"  # Set the compliance type as required
+#         p_resultrecordedtime = output.get('OpenedAt', '')  # Replace 'OpenedAt' with the actual key
+#         p_accountid = output.get('CloudAccountId', '')  # Replace 'CloudAccountId' with the actual key
+#         p_remedystatus = "Active"  # Set the remedy status as required
+#         p_region = output.get('ResourceRegion', '')
+
+#         print("Extracted values:", p_assetname, p_configrulename, p_resourcetype, p_compliancetype, p_resultrecordedtime, p_accountid, p_remedystatus, p_region)
+
+#         # Construct the parameterized SQL query
+#         sql_query = """CALL ccsadminnew.sp_insert_ccsazurealerts(%s, %s, %s, %s, %s, %s, %s, %s)"""
+        
+#         # Execute the parameterized SQL query with the extracted values
+#         cursor.execute(sql_query, (p_assetname, p_configrulename, p_resourcetype, p_compliancetype, p_resultrecordedtime, p_accountid, p_remedystatus, p_region))
+
+#         conn.commit()
+#         print("Non-compliance data inserted into the database successfully")
+#     except Exception as e:
+#         conn.rollback()
+#         print("Error occurred while inserting non-compliance data:", e)
+#     finally:
+#         cursor.close()
+#         conn.close()
+
+def p307(asset_name,resource_type, asset_type,location,Status,subscription_id):
+    Policyname = "API Management services should use a virtual network"
+    Description = "Deploying your API management service inside a virtual network allows more security and control over the network access"  
+    Recommendation  = "1) Ensure that your API management service is upgraded to premium tier 2) Navigate to the virtual network section and update your virtual network"   
+    output_data= output(Policyname,location,asset_name,resource_type, asset_type,Status,Description,Recommendation,subscription_id)
+    non_compliance_db_insert(output_data)
+    return output_data
+
+def p389(asset_name,resource_type, asset_type,location,Status,subscription_id):
+    Policyname = "Ensure that a 'Diagnostics Setting' exists for API Management Service"
+    Description = "Enable Diagnostic settings for exporting activity logs. Diagnostic setting are available for each individual resources within a subscription. Settings should be configured for all appropriate resources for your environment."  
+    Recommendation  = "From Azure Console 1. Click on the resource that has a diagnostic status of disabled 2. Select Add Diagnostic Settings 3. Enter a Diagnostic setting name 4. Select the appropriate log, metric, and destination. (This may be Log Analytics/Storage account or Event Hub) 5. Click save Repeat these step for all resources as needed. Default Value: By default, diagnostic setting is not set."   
+    output_data= output(Policyname,location,asset_name,resource_type, asset_type,Status,Description,Recommendation,subscription_id)
+    non_compliance_db_insert(output_data)
+    return output_data
+------------------------
+#.env
+
+SECRET_NAME="dev/rds/postgresql16/ccs-development-rds"
+REGION_NAME="ap-south-1"
+DB_NAME="ccsdev"
+ACCOUNT_MASTER_TABLE="ccsadminnew.ccscloudaccountmaster"
+ASSET_TABLE="ccsadminnew.ccsazureassets"
+ALERT_TABLE="ccsadminnew.ccsazurealerts"
+
+ASSET_DYNAMO_TABLE="Azure_AssetDiscoveryLogs"
+COMPLIANCE_DYNAMO_TABLE="Azure_ccs_noncompliance_logs"
+
+-------------------------
+
+#automatic_scheduler.sh
+
+#!/bin/bash
+
+LOCKFILE="/tmp/azure_cron.lock"
+
+# Prevent overlapping runs
+if [ -e "$LOCKFILE" ]; then
+    echo "Another instance is already running. Exiting."
+    exit 1
+fi
+
+touch "$LOCKFILE"
+trap "rm -f $LOCKFILE" EXIT
+
+# Activate virtual environment
+source /root/Projects/ccs/bin/activate
+
+# Ensure log directory exists
+mkdir -p /root/Projects/logs
+
+# Get current timestamp in YYYYMMDD_HHMMSS format
+timestamp=$(date +"%Y%m%d_%H%M%S")
+
+# Create log file names with timestamp
+log1="/root/Projects/logs/azure_native_scheduler_${timestamp}.log"
+log2="/root/Projects/logs/carg_alerts_${timestamp}.log"
+
+python3 /root/Projects/azure_native_scheduler.py > "$log1" 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "azure_native_scheduler.py executed successfully. Running carg_alerts.py..." | tee -a "$log1"
+    python3 "/root/Projects/carg_alerts.py" > "$log2" 2>&1
+    echo "carg_alerts.py executed successfully." | tee -a "$log2"
+else
+    echo "azure_native_scheduler.py failed. Check $log1 for details. carg_alerts.py will not run."
+    exit 1
+fi
+
+---------------------------
+
+#azure_carg_scheduler.py
+
+import json
+from azure.identity import ClientSecretCredential
+from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.policyinsights import PolicyInsightsClient
+from azure.mgmt.policyinsights.models import PolicyStatesResource, QueryOptions
+import psycopg2
+import boto3
+import datetime
+import requests
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+import os
+# Load environment variables from .env file
+load_dotenv()
+
+def data_flush(connection):
+    try:
+        connection = connection
+        cursor = connection.cursor()
+        delete_query = "DELETE FROM ccsadminnew.ccsazureassets;"
+        response = cursor.execute(delete_query)
+        commit = connection.commit()
+    except Exception as e:
+        print(e)
+
+class AzureClient:
+    cloudType = 'Azure'
+    bussinessName = 'None'
+    applicationName = 'None'
+    createtime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def __init__(self,client_id, client_secret, tenant_id,subscription_id):
+        self.subscription_id = subscription_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.tenant_id = tenant_id
+        self.credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+        self.resource_client = ResourceManagementClient(self.credential, self.subscription_id)
+        self.policy_client = PolicyInsightsClient(self.credential, self.subscription_id)
+    def get_asset(self):
+        try:
+            resource_group_list = self.resource_client.resource_groups.list()
+            group_list = list(resource_group_list)
+            if resource_group_list is None:
+                print("No resource groups found in the subscription.")
+                return {
+                    'statusCode': 404,
+                    'body': 'No data found'
+                }
+            try:
+                for group in group_list:
+                # List resources in the resource group
+                    resources = self.resource_client.resources.list_by_resource_group(group.name)
+
+                    batch = []
+                    for resource in resources:
+
+                        if resource.managed_by is None:
+                            resource.managed_by = 'None'
+                            resource_type, asset_type = resource.type.split("/", 1)
+                            batch.append((resource.name, resource_type, asset_type, self.subscription_id, self.cloudType, resource.location, self.bussinessName, self.applicationName,resource.managed_by, self.createtime, resource.managed_by, self.createtime))
+                        else:
+                            batch.append((resource.name, resource_type, asset_type, self.subscription_id, self.cloudType, resource.location, self.bussinessName, self.applicationName,resource.managed_by, self.createtime, resource.managed_by, self.createtime))
+                    try:
+                        insert_db(batch)
+                    except Exception as e:
+                        print(f"Error : {e}")
+                return(group_list)
+            except Exception as e:
+                print(f"Error: {e}")
+        except Exception as e:
+            print(f"Error : {e}")
+
+def insert_db(batch):
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        insert_query = """INSERT INTO ccsadminnew.ccsazureassets(assetname, resourcetype, assettype, accountid, cloudtype, region, businessname, applicationname, createdby, createdon, modifiedby, modifiedon)VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);"""
+        cursor.executemany(insert_query, batch)
+        connection.commit()
+    except Exception as e:
+        print(f"Error : {e}")
+
+def get_secret():
+    secret_name = os.environ.get('SECRET_NAME')
+    region_name = os.environ.get('REGION_NAME')
+    secretsmanager_client = boto3.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+def get_db_connection():
+    secret = json.loads(get_secret())
+    conn = psycopg2.connect(
+        host=secret['proxy'],
+        port=secret['port'],
+        database=secret['dbname'],
+        user=secret['username'],
+        password=secret['password']
+    )
+    return conn
+
+def main():
+    try:
+        start_time = datetime.datetime.now()
+        print("starttime", start_time)
+        connection = get_db_connection()
+        data_flush(connection)
+        cursor = connection.cursor()
+        cursor.execute("SELECT clientid, clientsecret, tenantid, subscriptionid FROM ccsadminnew.ccscloudaccountmaster where cloudtype_id=2;")
+        rows = cursor.fetchall()
+        if not rows:
+            return {
+                'statusCode': 404,
+                'body': 'No data found'
+            }
+        try:
+            for row in rows:
+                client = AzureClient(row[0], row[1], row[2], row[3])
+                resourceManager = client.resource_client
+                policyClient = client.policy_client
+                credential = client.credential
+                client.get_asset()
+            cursor.close()
+            connection.close()
+            end_time = datetime.datetime.now()
+            print("endtime", end_time)
+            elapsed_time = end_time - start_time
+            print("Elapsed time:", elapsed_time)
+        except Exception as e:
+            print(f"Error in calling functions: {e}")
+        return {
+            'statusCode': 200,
+            'body': 'Azure Inventory data successfullly inserted'
+        }
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return {
+            'statusCode': 500,
+            'body': 'Error create connection or inserting Azure Inventory data'
+        }
+
+if __name__ == "__main__":
+    main()
+
+    ------------------------
+#azure_native_scheduler.py
+
+import json
+from azure.identity import ClientSecretCredential
+from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.policyinsights import PolicyInsightsClient
+from azure.mgmt.policyinsights.models import PolicyStatesResource, QueryOptions
+import psycopg2
+import boto3
+import datetime
+import requests
+import base64
+import os
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+# Load environment variables from .env file
+load_dotenv()
+
+def base64decoder(encoded_string):
+    try:
+        decoded_bytes = base64.b64decode(encoded_string)
+        decoded_string = decoded_bytes.decode('utf-8')
+        return decoded_string
+    except Exception as e:
+        print(f"Error decoding base64 string: {e}")
+        return None
+
+def data_flash(connection):
+    try:
+        connection = connection
+        cursor = connection.cursor()
+        delete_query = "DELETE FROM ccsadminnew.ccsazureassets;"
+        response = cursor.execute(delete_query)
+        commit = connection.commit()
+    except Exception as e:
+        print(e)
+
+def alert_table_data_flash(connection):
+    try:
+        connection = connection
+        cursor = connection.cursor()
+        truncate_query = "TRUNCATE TABLE ccsadminnew.ccsazurealerts RESTART IDENTITY;"
+        response = cursor.execute(truncate_query)
+        commit = connection.commit()
+    except Exception as e:
+        print(e)
+
+# def data_pipeline(client_id, client_secret, tenant_id,subscription_id,group_list):
+#     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+#     resource_group_list = [str(item) for item in group_list]
+#     data = {
+#         "tenant_id": tenant_id,
+#         "client_id": client_id,
+#         "client_secret": client_secret,
+#         "subscription_id": subscription_id,
+#         "group_list": resource_group_list,
+#         "timestamp": timestamp
+#     }
+#     region_name = "ap-south-1"
+#     sns_client = boto3.client('sns', region_name=region_name)
+#     topic_arn = 'arn:aws:sns:ap-south-1:891377335739:AzureAssetDataPipeline'  # Replace with your actual SNS topic ARN
+#     try:
+#         publish_data = sns_client.publish(
+#             TopicArn=topic_arn,
+#             Message= json.dumps(data),
+#         )
+#         print("Data pipeline completed, message publised successfully")
+#     except Exception as e:
+#         print("error:",e)
+
+
+class AzureClient:
+    cloudType = 'Azure'
+    #bussinessName = ''
+    #applicationName = ''
+    createtime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def __init__(self,client_id, client_secret, tenant_id,subscription_id):
+        self.subscription_id = subscription_id
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.tenant_id = tenant_id
+        self.credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+        self.resource_client = ResourceManagementClient(self.credential, self.subscription_id)
+        self.policy_client = PolicyInsightsClient(self.credential, self.subscription_id)
+    def get_asset(self):
+        try:
+            resource_group_list = self.resource_client.resource_groups.list()
+            group_list = list(resource_group_list)
+            if resource_group_list is None:
+                print("No resource groups found in the subscription.")
+                return {
+                'statusCode': 404,
+                'body': json.dumps('No data found')}
+            try:
+                for group in group_list:
+                # List resources in the resource group
+                    resources = self.resource_client.resources.list_by_resource_group(group.name)
+                    print(resources)
+                    batch = []
+                    for resource in resources:
+                        print("resource:", resource)
+                        if resource.managed_by is None:
+                            resource.managed_by = 'None'
+                            resource_type, asset_type = resource.type.split("/", 1)
+                            asset_type = asset_type.capitalize()
+                            print("_______________________")
+                            print("name",resource.name)
+                            print("resource_type:", resource_type, "asset_type:", asset_type.capitalize())
+                            print("________________")
+                            resource_type = resource_type.lower()
+                            batch.append((resource.name, resource_type, asset_type, self.subscription_id, self.cloudType, resource.location, resource.managed_by, self.createtime, resource.managed_by, self.createtime))
+                        else:
+                            resource_type = resource_type.lower()
+                            batch.append((resource.name, resource_type, asset_type, self.subscription_id, self.cloudType, resource.location, resource.managed_by, self.createtime, resource.managed_by, self.createtime))
+                    try:
+                        print("batch:", batch)
+                        insert_db(batch)
+                    except Exception as e:
+                        print(f"Error : {e}")
+                return(group_list)
+            except Exception as e:
+                print(f"Error: {e}")
+        except Exception as e:
+            print(f"Error : {e}")
+
+def insert_db(batch):
+        try:
+            connection = get_db_connection()
+            cursor = connection.cursor()
+            insert_query = """INSERT INTO ccsadminnew.ccsazureassets(assetname, resourcetype, assettype, accountid, cloudtype, region, createdby, createdon, modifiedby, modifiedon)VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);"""
+            cursor.executemany(insert_query, batch)
+            connection.commit()
+        except Exception as e:
+            print(f"Error : {e}")
+
+def get_secret():
+    secret_name = os.environ.get('SECRET_NAME')
+    region_name = os.environ.get('REGION_NAME')
+    secretsmanager_client = boto3.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    try:
+        get_secret_value_response = secretsmanager_client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        raise e
+    return get_secret_value_response['SecretString']
+
+def get_db_connection():
+    secret = json.loads(get_secret())
+    conn = psycopg2.connect(
+        host=secret['proxy'],
+        port=secret['port'],
+        database=secret['dbname'],
+        user=secret['username'],
+        password=secret['password']
+    )
+    return conn
+
+def non_compliant_data_insertion(resource_id, policy_definition_id, group_name, credential):
+    data = []
+    try:
+        resource_id = resource_id
+        policy_definition_id = policy_definition_id
+        group_name = group_name
+        credential = credential
+        data = []
+
+        # Specify the policy definition ID for which you want to retrieve the details
+        policy_definition_id = f"/providers/Microsoft.Authorization/policyDefinitions/{policy_definition_id}"
+
+        # Make a request to the Azure Resource Manager REST API to retrieve the policy definition
+        url = f"https://management.azure.com{policy_definition_id}?api-version=2020-09-01"
+        headers = {
+            "Authorization": f"Bearer {credential.get_token('https://management.azure.com/.default').token}"
+        }
+        response = requests.get(url, headers=headers)
+
+        # Retrieve the policy definition from the response
+        if response.status_code == 200:
+
+            policy_definition = response.json()
+            policy_description = policy_definition['properties']['description']
+            data.append({
+            'group_name': group_name,
+            'resource_id': resource_id,
+            'policy_definition_id': policy_definition_id,
+            'policy_description': policy_description
+        })
+            # print("data:", data)
+            #we have to insert the SP for alert data (non-compliant data)
+        else:
+            print(f"Failed to retrieve the policy definition. Status code: {response.status_code}, Response: {response.text}")
+
+    except Exception as e:
+        print(f"Error in nc data insert: {e}")
+
+def non_compliant_data_collection(group_list, resourceManager, policyClient, credential):
+    credential = credential
+    if len(group_list)==0:
+        print("No resource groups found in the subscription.")
+    try:
+        for group in group_list:
+        # List resources in the resource group
+            resource = resourceManager
+            policy_client = policyClient
+            resources = resource.resources.list_by_resource_group(group.name)
+            for resource in resources:
+                # Retrieve the policy states for each resource
+                policy_states = policy_client.policy_states.list_query_results_for_resource(
+                    policy_states_resource=PolicyStatesResource.LATEST,
+                    # subscription_id=subscription_id,
+                    resource_id=resource.id
+                )
+                # Determine compliance state and detailed reasons
+                for state in policy_states:
+                    compliance_state = "Compliant" if state.is_compliant else "Non-Compliant"
+
+                    if not state.is_compliant:
+                        definition_id = state.policy_definition_name
+                        resource_id = state.resource_id
+                        group_name = group.name
+                        data_insert_fn = non_compliant_data_insertion(resource_id, definition_id, group_name, credential)
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps('Error in non-compliant data collection')
+        }
+
+def main():
+    try:
+        start_time = datetime.datetime.now()
+        connection = get_db_connection()
+        alert_table_data_flash(connection)
+        print("starttime", start_time)
+        data_flash(connection)
+
+        cursor = connection.cursor()
+        cursor.execute("SELECT clientid, clientsecret, tenantid, subscriptionid FROM ccsadminnew.ccscloudaccountmaster where cloudtype_id=2;")
+        rows = cursor.fetchall()
+        if not rows:
+            return {
+                'statusCode': 404,
+                'body': json.dumps('No data found')
+            }
+        try:
+            for row in rows:
+                client_id_decoded = base64decoder(row[0])
+                client_secret_decoded = base64decoder(row[1])
+                tenant_id_decoded = base64decoder(row[2])
+                client = AzureClient(client_id_decoded, client_secret_decoded, tenant_id_decoded, row[3])
+                resourceManager = client.resource_client
+                policyClient = client.policy_client
+                credential = client.credential
+                group_list = client.get_asset()
+                # data_pipeline(client_id_decoded, client_secret_decoded, tenant_id_decoded, row[3],group_list)
+                non_compliant_data_collection(group_list, resourceManager, policyClient, credential)
+            cursor.close()
+            connection.close()
+            end_time = datetime.datetime.now()
+            print("endtime", end_time)
+            elapsed_time = end_time - start_time
+            print("Elapsed time:", elapsed_time)
+        except Exception as e:
+            print(f"Error in calling functions: {e}")
+        return {
+                'statusCode': 200,
+                'body': json.dumps('Azure Inventory data successfullly inserted')
+                }
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps('Error create connection or inserting Azure Inventory data')
+        }
+
+if __name__ == "__main__":
+    main()
+
+--------------------
+
+#carg_alerts.py
+
+import subprocess
+
+def run_file(filename):
+    print(f"Running {filename} ...")
+    try:
+        result = subprocess.run(['python', filename], capture_output=True, text=True)
+        print(f"Output of {filename}:\n{result.stdout}")
+        if result.stderr:
+            print(f"Errors in {filename}:\n{result.stderr}")
+    except Exception as e:
+        print(f"Error running {filename}: {e}")
+    print("-" * 80)
+
+if __name__ == "__main__":
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Storage Accounts/StorageAccounts_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Network Watcher/NW_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/API_Management_Services/API_exec.py')
+    run_file("/root/Projects/CARG/Azure_CARG_Services/Virtual_Networks/Virtual_Network/Vnet_exec.py")
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Load_Balancers/LB_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Network_Interface/NI_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/SQL_Database/SQL_Database_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Key_Vault/KV_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Signal_R/SignalR_exec.py')
+    # run_file('/root/Projects/CARG/Azure_CARG_Services/Azure_Database_for_PostgreSQL_servers/PostgreSQL_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Azure_Database_for_MySQL_servers/MySQL_exec.py')
+    run_file('/root/Projects/CARG/Azure_CARG_Services/Azure_Database_for_PostgreSQL_flexible_servers/flexi_server_exec.py')
+
+    --------------------------
+
+#README.md
+
+
+
+1. Install uv in EC2 Linux instance
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+exec bash
+uv --version
+```
+
+2. Create a python virtual environment ccs using Python v3.9
+3. Install all the python modules using requirements.txt
+4. make the Bash Script Executable
+
+```bash
+cd /root/Projects
+uv venv ccs --python 3.12
+source ccs/bin/activate
+uv pip install -r requirements.txt
+chmod +x *.sh
+```
+
+5. Start the Azure Scheduler
+
+```bash
+bash /root/Projects/start_scheduler.sh
+```
+
+6. Stop the Azure Scheduler
+
+```bash
+bash /root/Projects/stop_scheduler.sh
+```
+-----------------------
+
+#requirement.txt
+
+azure-common
+azure-core
+azure-identity
+azure-mgmt-core
+azure-mgmt-policyinsights
+azure-mgmt-resource
+azure-mgmt-storage
+boto3
+botocore
+certifi
+cffi
+charset-normalizer
+cryptography
+idna
+isodate
+jmespath
+msal
+msal-extensions
+msrest
+numpy
+oauthlib
+pandas
+pip
+psycopg2-binary
+pycparser
+PyJWT
+python-dateutil
+python-dotenv
+pytz
+requests
+requests-oauthlib
+s3transfer
+six
+typing_extensions
+tzdata
+urllib3
+xmltodict
+----------------------------
+
+#runscheduler.sh
+
+#!/bin/bash
+while true; do
+    /root/Projects/automatic_scheduler.sh
+    sleep 3600  # Wait 1 Hour before next run
+done
+
+# ======================================================================================
+# In order to start the azure scheduler start the following lines
+#
+# $> nohup /root/Projects/run_scheduler_loop.sh > /root/Projects/logs/daemon.log 2>&1 &
+# $> ps aux | grep run_scheduler_loop.sh
+# ======================================================================================
+
+# ======================================================================================
+# In order to stop the azure scheduler start the following lines
+#
+# $> ps aux | grep run_scheduler_loop.sh
+# $> kill -9 <Proccess_ID of run_scheduler_loop.sh>
+# ======================================================================================
+-------------------
+
+#start_scheduler.sh
+
+#!/bin/bash
+
+# Create log directory if it doesn't exist
+mkdir -p /root/Projects/logs
+
+# Find the PID of the script
+PID=$(ps aux | grep '[r]un_scheduler_loop.sh' | awk '{print $2}')
+
+# Check if PID was found
+if [ -n "$PID" ]; then
+    echo "[INFO] Azure Scheduler running with PID: $PID"
+else
+	nohup /root/Projects/run_scheduler_loop.sh > /root/Projects/logs/daemon.log 2>&1 &
+	PID=$!
+	# Check if the process is running
+	if pgrep -f run_scheduler_loop.sh > /dev/null; then
+		echo "[SUCCESS] Azure Scheduler is running successfully"
+		echo "[INFO] Azure Scheduler running with PID: $PID"
+	else
+		echo "[ERROR] Failed to start Azure Scheduler"
+	fi
+fi
+
+
+------------------------
+
+#stop scheduler.sh
+
+# Stop the scheduler
+#!/bin/bash
+# This script stops the scheduler service
+
+# Find the PID of the script
+PID=$(ps aux | grep '[r]un_scheduler_loop.sh' | awk '{print $2}')
+
+# Check if PID was found
+if [ -n "$PID" ]; then
+    echo "[INFO] Azure Scheduler running with PID: $PID"
+    echo "[INFO] Stopping the Azure Scheduler process..."
+    kill -9 "$PID"
+
+    # Optional: check if kill succeeded
+    if [ $? -eq 0 ]; then
+        echo "[SUCCESS] Process $PID killed."
+    else
+        echo "[ERROR] Failed to kill process $PID."
+    fi
+else
+    echo "[INFO] Azure Scheduler not running, nothing to stop."
+fi
+---------------------
+
+testcase.py
+
+import pytest
+from unittest.mock import patch, MagicMock
+import lambda_function
+
+# Mock environment variables
+import os
+os.environ['SECRET_NAME'] = 'dummy-secret'
+os.environ['REGION_NAME'] = 'dummy-region'
+os.environ['ACCOUNT_MASTER_TABLE'] = 'account_master'
+os.environ['ALERT_TABLE'] = 'alert_table'
+os.environ['AZURE_SUBSCRIPTION_ID'] = 'subid'
+os.environ['AZURE_TENANT_ID'] = 'tenantid'
+os.environ['AZURE_CLIENT_ID'] = 'clientid'
+os.environ['AZURE_CLIENT_SECRET'] = 'clientsecret'
+
+# -------- Test get_secret --------
+
+@patch('lambda_function.secretmanager_client')
+def test_get_secret(mock_sm_client):
+    mock_sm_client.get_secret_value.return_value = {'SecretString': '{"username": "user", "password": "pass"}'}
+    result = lambda_function.get_secret()
+    assert result == '{"username": "user", "password": "pass"}'
+
+# -------- Test db_manager --------
+
+@patch('lambda_function.get_secret')
+@patch('lambda_function.psycopg2.connect')
+def test_db_manager_success(mock_connect, mock_get_secret):
+    mock_get_secret.return_value = '{"dbname":"db", "username":"user", "password":"pass", "proxy":"host", "port":"5432"}'
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = ("accesskey", "secretkey")
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    accesskey, secretkey = lambda_function.db_manager("test_account")
+    assert accesskey == "accesskey"
+    assert secretkey == "secretkey"
+
+@patch('lambda_function.get_secret')
+@patch('lambda_function.psycopg2.connect')
+def test_db_manager_no_data(mock_connect, mock_get_secret):
+    mock_get_secret.return_value = '{"dbname":"db", "username":"user", "password":"pass", "proxy":"host", "port":"5432"}'
+    mock_cursor = MagicMock()
+    mock_cursor.fetchone.return_value = None
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    accesskey, secretkey = lambda_function.db_manager("unknown_account")
+    assert accesskey is None and secretkey is None
+
+# -------- Test status_manager --------
+
+@patch('lambda_function.get_secret')
+@patch('lambda_function.psycopg2.connect')
+def test_status_manager_success(mock_connect, mock_get_secret):
+    mock_get_secret.return_value = '{"dbname":"db", "username":"user", "password":"pass", "proxy":"host", "port":"5432"}'
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+
+    # Should not raise exceptions
+    lambda_function.status_manager("alertid")
+    mock_cursor.execute.assert_called_once()
+
+# -------- Test get_resource_group_name --------
+
+@patch('lambda_function.StorageManagementClient')
+@patch('lambda_function.ClientSecretCredential')
+def test_get_resource_group_name(mock_cred, mock_storage_client):
+    # Simulate storage account list
+    mock_account = MagicMock()
+    mock_account.name = 'myaccount'
+    mock_account.id = '/subscriptions/123/resourceGroups/mygroup/providers/Microsoft.Storage/storageAccounts/myaccount'
+    mock_storage_client.return_value.storage_accounts.list.return_value = [mock_account]
+
+    rg = lambda_function.get_resource_group_name(
+        'subid', 'tenantid', 'clientid', 'clientsecret', 'myaccount'
+    )
+    assert rg == 'mygroup'
+
+@patch('lambda_function.StorageManagementClient')
+@patch('lambda_function.ClientSecretCredential')
+def test_get_resource_group_name_not_found(mock_cred, mock_storage_client):
+    # Simulate no match
+    mock_account = MagicMock()
+    mock_account.name = 'otheraccount'
+    mock_account.id = '/subscriptions/123/resourceGroups/othergroup/providers/Microsoft.Storage/storageAccounts/otheraccount'
+    mock_storage_client.return_value.storage_accounts.list.return_value = [mock_account]
+
+    with pytest.raises(Exception):
+        lambda_function.get_resource_group_name(
+            'subid', 'tenantid', 'clientid', 'clientsecret', 'notfound'
+        )
+
+# -------- Test main --------
+
+@patch('lambda_function.get_resource_group_name')
+@patch('lambda_function.status_manager')
+@patch('lambda_function.get_secret')
+@patch.dict(lambda_function.RULE_ACTIONS, {
+    "SampleRule": (lambda *a, **k: True, "Success msg"),
+})
+def test_main_success(mock_get_secret, mock_status, mock_get_rg):
+    event = {
+        "ConfigRuleName": "SampleRule",
+        "lambdaArgs": {
+            "ACCOUNTID": "aid",
+            "ALERTID": "alertid",
+            "RESOURCETYPE": "storage",
+            "ASSETID": "assetid",
+            "REGIONNAME": "region"
+        }
+    }
+    mock_get_rg.return_value = 'dummy-rg'
+    mock_get_secret.return_value = '{"dbname":"db"}'
+
+    resp = lambda_function.main(event, {})
+    assert resp['statusCode'] == 200
+    assert "Selfheal has been completed" in resp['title']
+
+def test_success_response():
+    msg = "Hello"
+    resp = lambda_function.success_response(msg)
+    assert resp['statusCode'] == 200
+    assert 'Hello' in resp['body']
+
+def test_failure_response():
+    msg = "Fail"
+    resp = lambda_function.failure_response(msg)
+    assert resp['statusCode'] == 404
+    assert 'Fail' in resp['body']
